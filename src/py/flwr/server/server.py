@@ -54,6 +54,58 @@ ReconnectResultsAndFailures = Tuple[
     List[Union[Tuple[ClientProxy, DisconnectRes], BaseException]],
 ]
 
+
+def get_logits(net, trainloader):
+    criterion = torch.nn.CrossEntropyLoss()
+    net.eval()
+    logits = torch.tensor([])
+    with torch.no_grad():
+        for batch in trainloader:
+            images, labels = batch["features"].to(DEVICE), batch["labels"].to(DEVICE)
+            outputs = net(images)
+            logits = torch.cat([logits,outputs],dim=0)
+    return logits
+
+def train_knowledge_distillation(teacher_logits, student, train_loader, epochs, learning_rate, T, soft_target_loss_weight, ce_loss_weight, device):
+    ce_loss = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(student.parameters(), lr=learning_rate)
+
+    student.train() # Student to train mode
+    total_data = 0
+    for epoch in range(epochs):
+        # running_loss = 0.0
+        correct, total, epoch_loss = 0, 0, 0.0
+        for batch in train_loader:
+            inputs, labels = batch["features"].to(DEVICE), batch["labels"].to(DEVICE)
+
+            optimizer.zero_grad()
+
+            # Forward pass with the teacher model - do not save gradients here as we do not change the teacher's weights
+            teacher_logits_sub = np.array(teacher_logits)[total_data:len(labels)]
+            total_data += len(labels)
+
+            # Forward pass with the student model
+            student_logits = student(inputs)
+
+            #Soften the student logits by applying softmax first and log() second
+            soft_targets = nn.functional.softmax(teacher_logits_sub / T, dim=-1)
+            soft_prob = nn.functional.log_softmax(student_logits / T, dim=-1)
+
+            # Calculate the soft targets loss. Scaled by T**2 as suggested by the authors of the paper "Distilling the knowledge in a neural network"
+            soft_targets_loss = torch.sum(soft_targets * (soft_targets.log() - soft_prob)) / soft_prob.size()[0] * (T**2)
+
+            # Calculate the true label loss
+            label_loss = ce_loss(student_logits, labels.long())
+
+            # Weighted sum of the two losses
+            loss = soft_target_loss_weight * soft_targets_loss + ce_loss_weight * label_loss
+
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item()
+
+
 def get_parameters(net) -> List[np.ndarray]:
         # Return model parameters as a list of NumPy ndarrays, excluding parameters of BN layers when using FedBN
         return [val.cpu().numpy() for name, val in net.state_dict().items() if 'bn' not in name]
