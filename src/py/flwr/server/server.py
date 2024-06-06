@@ -54,6 +54,16 @@ ReconnectResultsAndFailures = Tuple[
     List[Union[Tuple[ClientProxy, DisconnectRes], BaseException]],
 ]
 
+def get_parameters(net) -> List[np.ndarray]:
+        # Return model parameters as a list of NumPy ndarrays, excluding parameters of BN layers when using FedBN
+        return [val.cpu().numpy() for name, val in net.state_dict().items() if 'bn' not in name]
+
+def set_parameters(net, parameters: List[np.ndarray]) -> None:
+    # Set model parameters from a list of NumPy ndarrays
+    keys = [k for k in net.state_dict().keys() if 'bn' not in k]
+    params_dict = zip(keys, parameters)
+    state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+    net.load_state_dict(state_dict, strict=False)
 
 class Server:
     """Flower server."""
@@ -63,13 +73,17 @@ class Server:
         *,
         client_manager: ClientManager,
         strategy: Optional[Strategy] = None,
-    ) -> None:
+        publicloaders
+    ):
         self._client_manager: ClientManager = client_manager
         self.parameters: Parameters = Parameters(
             tensors=[], tensor_type="numpy.ndarray"
         )
         self.strategy: Strategy = strategy if strategy is not None else FedAvg()
         self.max_workers: Optional[int] = None
+        self.publicloaders = publicloaders
+        self.logits = None
+        self.global_net = Net().to(DEVICE)
 
     def set_max_workers(self, max_workers: Optional[int]) -> None:
         """Set the max_workers used by ThreadPoolExecutor."""
@@ -83,14 +97,19 @@ class Server:
         """Return ClientManager."""
         return self._client_manager
 
+    def get_logits(self, parameters, loader):
+        set_parameters(self.global_net, parameters_to_ndarrays(parameters))
+        self.logits = get_logits(self.global_net, self.publicloaders)
+    
     # pylint: disable=too-many-locals
-    def fit(self, num_rounds: int, timeout: Optional[float]) -> Tuple[History, float]:
+    def fit(self, num_rounds: int, timeout: Optional[float]):
         """Run federated averaging for a number of rounds."""
         history = History()
 
         # Initialize parameters
         log(INFO, "[INIT]")
         self.parameters = self._get_initial_parameters(server_round=0, timeout=timeout)
+        self.get_logits(self.parameters,self.publicloaders)
         log(INFO, "Evaluating initial global parameters")
         res = self.strategy.evaluate(0, parameters=self.parameters)
         if res is not None:
@@ -160,15 +179,14 @@ class Server:
         self,
         server_round: int,
         timeout: Optional[float],
-    ) -> Optional[
-        Tuple[Optional[float], Dict[str, Scalar], EvaluateResultsAndFailures]
-    ]:
+    ):
         """Validate current global model on a number of clients."""
         # Get clients and their respective instructions from strategy
         client_instructions = self.strategy.configure_evaluate(
             server_round=server_round,
-            parameters=self.parameters,
             client_manager=self._client_manager,
+            logits=self.logits,
+            data=self.publicloaders,
         )
         if not client_instructions:
             log(INFO, "configure_evaluate: no clients selected, skipping evaluation")
@@ -205,17 +223,16 @@ class Server:
 
     def fit_round(
         self,
-        server_round: int,
-        timeout: Optional[float],
-    ) -> Optional[
-        Tuple[Optional[Parameters], Dict[str, Scalar], FitResultsAndFailures]
-    ]:
+        server_round,
+        timeout,
+    ):
         """Perform a single round of federated averaging."""
         # Get clients and their respective instructions from strategy
         client_instructions = self.strategy.configure_fit(
             server_round=server_round,
-            parameters=self.parameters,
             client_manager=self._client_manager,
+            logits=self.logits,
+            data=self.publicloaders,
         )
 
         if not client_instructions:
@@ -241,6 +258,7 @@ class Server:
             len(results),
             len(failures),
         )
+        print("Resos",results,failures)
 
         # Aggregate training results
         aggregated_result: Tuple[
@@ -249,6 +267,11 @@ class Server:
         ] = self.strategy.aggregate_fit(server_round, results, failures)
 
         parameters_aggregated, metrics_aggregated = aggregated_result
+
+        train_knowledge_distillation(teacher_logits=parameters_aggregated, student=self.global_net, train_loader=self.publicloaders, epochs=5, learning_rate=0.001, T=2, soft_target_loss_weight=0.25, ce_loss_weight=0.75, device=DEVICE)
+
+        parameters_aggregated = get_parameters(self.global_net)
+
         return parameters_aggregated, metrics_aggregated, (results, failures)
 
     def disconnect_all_clients(self, timeout: Optional[float]) -> None:
@@ -263,34 +286,10 @@ class Server:
             timeout=timeout,
         )
 
-    def _get_initial_parameters(
-        self, server_round: int, timeout: Optional[float]
-    ) -> Parameters:
-        """Get initial parameters from one of the available clients."""
-        # Server-side parameter initialization
-        parameters: Optional[Parameters] = self.strategy.initialize_parameters(
-            client_manager=self._client_manager
-        )
-        if parameters is not None:
-            log(INFO, "Using initial global parameters provided by strategy")
-            return parameters
-
-        # Get initial parameters from one of the clients
-        log(INFO, "Requesting initial parameters from one random client")
-        random_client = self._client_manager.sample(1)[0]
-        ins = GetParametersIns(config={})
-        get_parameters_res = random_client.get_parameters(
-            ins=ins, timeout=timeout, group_id=server_round
-        )
-        if get_parameters_res.status.code == Code.OK:
-            log(INFO, "Received initial parameters from one random client")
-        else:
-            log(
-                WARN,
-                "Failed to receive initial parameters from the client."
-                " Empty initial parameters will be used.",
-            )
-        return get_parameters_res.parameters
+    def _get_initial_parameters(self, server_round, timeout):
+        parameters = get_parameters(self.global_net)
+        parameters = ndarrays_to_parameters(parameters)
+        return parameters
 
 
 def reconnect_clients(
