@@ -38,7 +38,7 @@ from flwr.server.client_manager import ClientManager, SimpleClientManager
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.history import History
 from flwr.server.strategy import FedAvg, Strategy
-
+import numpy as np
 from .server_config import ServerConfig
 
 FitResultsAndFailures = Tuple[
