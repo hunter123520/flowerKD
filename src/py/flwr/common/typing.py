@@ -106,7 +106,8 @@ class GetParametersRes:
 class FitIns:
     """Fit instructions for a client."""
 
-    parameters: Parameters
+    logits:None
+    data: None
     config: Dict[str, Scalar]
 
 
@@ -115,7 +116,7 @@ class FitRes:
     """Fit response from a client."""
 
     status: Status
-    parameters: Parameters
+    logits: None
     num_examples: int
     metrics: Dict[str, Scalar]
 
@@ -124,7 +125,8 @@ class FitRes:
 class EvaluateIns:
     """Evaluate instructions for a client."""
 
-    parameters: Parameters
+    logits:None
+    data: None
     config: Dict[str, Scalar]
 
 
