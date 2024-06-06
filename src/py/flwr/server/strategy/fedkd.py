@@ -36,7 +36,7 @@ from flwr.common import (
 from flwr.common.logger import log
 from flwr.server.client_manager import ClientManager
 from flwr.server.client_proxy import ClientProxy
-from .FedAvg import FedAvg
+from .fedavg import FedAvg as FedAvg
 from .aggregate import aggregate, aggregate_inplace, weighted_loss_avg
 from .strategy import Strategy
 
